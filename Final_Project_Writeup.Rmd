@@ -1,0 +1,357 @@
+---
+title: |
+  | \vspace{5cm} "Prediction Methods on Walmart Sales Data"
+author: "Spencer Tang"
+date: "5/7/2022"
+output:
+  pdf_document: default
+  fig_caption: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+\newpage
+
+# Introduction
+
+The goal of this project is to apply several sets of models to determine if there is a relationship between any of the predictors. I opt to use weekly sales as the predictor and all other variables within the data set as the response. A secondary goal of this project will be to compare several sets of models using RMSE values and determine if other methods may be useful for prediction and see how them compare to using a multiple linear regression model.
+
+# Data Description
+
+I found this data set from an author on kaggle, a link to which is provided here: <https://www.kaggle.com/datasets/yasserh/walmart-dataset?resource=download>
+
+The base data set before further data wrangling has eight columns, Store, Date, Weekly_Sales, Holiday_Flag, Temperature, CPI, Fuel_Price, and Unemployment. This data set takes weekly sales numbers from 45 Walmart stores from the time period of 2/5/2010 to 10/26/2012. CPI stands for consumer price index, a macroeconomic indicator and Fuel_Price is a variable for the cost of a gallon of gas during that week. Temperature is in Fahrenheit and Unemployment is the unemployment rate during that week. The Holiday_Flag is a categorical variable which is set to 1 for the holiday weeks of the Super Bowl, Labor Day, Thanksgiving, and Christmas.
+
+There are 6,435 rows and 8 columns within the data set.
+
+```{r message=FALSE, warning=FALSE, include=FALSE}
+library(ggplot2)
+library(dplyr)
+library(readr)
+library(lubridate)
+library(forecast)
+library(tidyverse)
+library(car)
+library(performance)
+library(randomForest)
+library(vip)
+```
+
+```{r include=FALSE}
+dataset <- read_csv("Walmart.csv")
+```
+
+```{r echo=TRUE}
+dim(dataset)
+```
+
+On initial investigation, a box plot with weekly sales and the categorical variable of store shows that the store variable may potentially explain a significant amount of the variation in weekly sales. While the top stores may make as much as 2 million dollars in weekly sales, stores on the lower end may make less than half a million dollars.
+
+```{r echo=FALSE, fig.cap='Store vs. Weekly Sales', fig.height=4, message=FALSE, warning=FALSE, paged.print=FALSE}
+
+ggplot(dataset, aes(x = reorder(as.factor(Store), 
+                                Weekly_Sales/ 1000), Weekly_Sales / 1000)) +
+       geom_boxplot() + 
+  coord_flip() +
+  xlab("Store") +
+  ylab("Weekly Sales in Thousands")
+```
+
+```{r echo=FALSE, fig.height=4, fig.cap='Weekly Sales vs. Date'}
+dataset$Date <- dmy(dataset$Date)
+
+ggplot(aes(x = Date, y = Weekly_Sales / 1000), data = dataset) +
+  geom_line() + 
+  scale_x_date(date_labels = "%m-%Y") +
+  ylab("Weekly Sales in Thousands")
+```
+
+We can see potential evidence of seasonal trends in the data with large spikes in weekly sales in the Months of November and December.
+
+Because I will use RMSE to compare the performance of our models using cross validation, I have included basic summary statistics for weekly sales to create a reference point for the RMSE values.
+
+```{r message=FALSE, warning=FALSE, fig.cap="Weekly Sales Summary Statistics"}
+summary(dataset$Weekly_Sales)
+```
+
+# Methods and Results
+
+```{r message=FALSE, warning=FALSE, include=FALSE, paged.print=TRUE}
+
+dataset$Store <- as.factor(dataset$Store)
+dataset$Holiday_Flag <- as.factor(dataset$Holiday_Flag)
+
+dataset <- dataset %>% 
+  mutate(Week_Number = week(Date))
+
+dataset <- dataset %>% 
+  mutate(Year = year(Date))
+
+dataset <- dataset %>% 
+  mutate(Month = month(Date))
+
+dataset$Month <- as.factor(dataset$Month)
+dataset$Week_Number <- as.factor(dataset$Week_Number)
+
+set.seed(222)
+
+training_id <- which(dataset$Year <= 2011)
+
+dataset_train <- dataset[training_id, ]
+dataset_test <- dataset[-training_id, ]
+
+dim(dataset_train)
+dim(dataset_test)
+dim(dataset)
+
+dataset$Year <- as.factor(dataset$Year)
+
+lm3 <- lm(Weekly_Sales ~ Holiday_Flag + Temperature + Fuel_Price + CPI + 
+            Unemployment + Store + Week_Number + Month, data = dataset_train)
+summary(lm3)
+```
+
+This data set contains consistent, weekly sales numbers from a period of time from 2010 to 2012 which means I am working with time series data. I first converted the Date column into a Date object and created seasonal dummy variables for both week and month. The `Holiday_Flag` and `Store` variables were both cast as factors along with the seasonal dummy variables.
+
+After cleaning the data, the next step is to split the data into training and test sets; I use all data points from the years of 2010 and 2011 as the training data and the results from 2012 as the test data. It important when working with time series data and cross validation to avoid randomly sampling to preserve the data's inherent aspects of trends and seasonality.
+
+As a first step, I created a full model using `Weekly_Sales` as the response, the other six predictors from the original data set excluding date, and the two seasonal dummy variables.
+
+$$
+\widehat{WeeklySales} = \beta_0 + \beta_1HolidayFlag + \beta_2Temperature + \beta_3FuelPrice + 
+$$
+
+$$
+\beta_4CPI + \beta_5Unemployment + \beta_6Store + \beta_7WeekNumber + \beta_8Month
+$$
+
+The initial overall F test was very significant with a p-value near 0 and an adjusted $R^2$ of 0.9436. Every predictor within this model besides several dummy variables within the categorical predictors had significant p-values less than the chosen alpha of 0.05.
+
+Using the `step()` function and its AIC minimization procedure, the output out of the step function kept all predictors within the model. From here I ran diagnostic checks to evaluate the traditional assumptions of constant variance, linearity, independence, and normality.
+
+```{r echo=FALSE, fig.cap='Diagnostics Check of Full Model', message=FALSE, warning=FALSE, paged.print=TRUE}
+check_model(lm3, check = c("qq", "pp_check", "ncv", "homogeneity", "outliers"))
+```
+
+We can see from the assorted diagnostic checks that the residuals have a heavy right tail skew and there is apparent heteroscedasticity from the squared standard residuals vs fitted plot. To further reduce the number of predictors within our model we can look at the Variable Inflation Factor(VIF) output .
+
+```{r message=FALSE, warning=FALSE, include=FALSE, paged.print=TRUE}
+ check_collinearity(lm3)
+```
+
+```{r echo=FALSE, fig.cap = "VIF Table"}
+library(knitr)
+
+tab <- matrix(c(5.71, 18.30, 1723.53, 43.18), ncol=4, byrow=TRUE)
+colnames(tab) <- c('Fuel_Price ','Temperature','CPI', 'Unemployment')
+rownames(tab) <- c('VIF')
+tab <- as.table(tab)
+kable(tab)
+
+```
+
+The `check_collinearity()` function returned high VIF values for all numerical predictors thus I struck them all from the model. I analyzed the adjusted $R^2$ value from both models to analyze the effects of removing the numerical predictors and saw a small change in adjusted $R^2$ from 0.9436 to 0.9431.
+
+```{r include=FALSE}
+lm3_reduced <- lm(Weekly_Sales ~ Holiday_Flag + 
+     Store + Week_Number + Month, data = dataset_train)
+summary(lm3_reduced)
+```
+
+From this point I ran a Box-Cox method to determine whether a transformation on the response might be necessary.
+
+```{r eval=FALSE, fig.cap=, message=FALSE, warning=FALSE, include=FALSE}
+library(MASS)
+library(car)
+boxcox(lm3_reduced)
+# summary(powerTransform(lm3_reduced))
+```
+
+The Box-Cox plot and associated `powerTransform()` function yielded a estimate for alpha close to 0 so I transformed the response of Weekly_Sales with the `log()` function. After removing the highly correlated predictors and executing a log transformation on the response, I settled on the final model with its output as follows:
+
+```{r echo=FALSE, message=FALSE, warning=FALSE, fig.cap="Final Linear Model Output"}
+library(jtools)
+
+lm3_trans <- lm(log(Weekly_Sales) ~ Holiday_Flag + 
+     Store + Week_Number + Month, data = dataset_train)
+summary(lm3_trans)
+```
+
+The final model leaves only categorical variables behind and thus its interpretation may not be very straightforward or even useful in some situations. The Holiday_Flag1 predictor is negative, which says that weeks which fall on four designated holidays make fewer weekly sales than weeks which do not fall on those four designated holidays. This conclusion is counter intuitive to summary statistics of the data set which state that Weekly Sales during holiday weeks are on average greater than that of non holiday weeks. I suspect that there may be additional confounding factors within the model which have yielded these coefficient estimates.
+
+```{r echo=FALSE, message=FALSE, warning=FALSE, fig.cap='Summary statistics of Weekly sales for holiday vs. nonholiday weeks'}
+subset(dataset$Weekly_Sales, dataset$Holiday_Flag == 1) %>% summary()
+subset(dataset$Weekly_Sales, dataset$Holiday_Flag == 0) %>% summary()
+```
+
+Each Store, Week_Number, and Month's coefficient estimates can be interpreted relative to to the first baseline or reference Store, Week_Number, and Month on the condition that the other predictors are held fixed. For example, the month of May has a negative sign next to its estimate, thus we can conclude that Weekly Sales in May are less than the Weekly Sales in January, with all other predictors held fixed. Two of the dummy variables within the Month factor return NA values because the months of September and December show perfect correlation with another predictor within the model.
+
+```{r echo=FALSE, fig.cap='acf and pacf plots', fig.height=3.5, message=FALSE, warning=FALSE}
+par(mfrow = c(1, 2), mar=c(5,4,4,2))
+acf(resid(lm3_trans), main="acf(resid(lm3_trans))")
+pacf(resid(lm3_trans), main="pacf(resid(lm3_trans))")
+```
+
+Taking both ACF and PACF plots of the residuals of our final model show that our traditional assumptions of independence for linear regression modeling are not satisfied, with clear evidence of autocorrelation to previous lagged values.
+
+```{r echo=FALSE, fig.cap='Final Model Diagnostics', fig.height=3.5, message=FALSE, warning=FALSE}
+par(mfrow = c(1,2))
+plot(lm3_trans, 1:2)
+```
+
+The final diagnostics check of the model show that the transformation and pruning of the full model down to the final model has improved on the full model's heteroscedasticity, but the residuals and variance of the data is not completely random, displaying heavy clustering in the residuals vs fitted values plot. Normality assumptions have also somewhat improved but are still far from ideal.
+
+## Random Forest Approach
+
+In this subsection I explore the usefulness of a Random Forest method to determine whether its use could possibly improve predictive capabilities and provide us information on which predictors in the model have the most influential effect on the response.
+
+```{r eval=FALSE, message=FALSE, warning=FALSE, include=FALSE}
+library(randomForest)
+library(vip)
+
+set.seed(222)
+
+rf1 <- randomForest(Weekly_Sales ~ Holiday_Flag + Temperature + Fuel_Price + 
+    CPI + Unemployment + Store + Week_Number + Month + Year, 
+    data = dataset_train, importance = TRUE)
+rf1
+```
+
+The initial random forest model, which uses the same response and predictors as the linear regression full model, resulted in an output with negative % Var explained on the out of bag data, a sign that the model is over fitting. After applying a `vif()` graphical analysis, I removed the least influential predictor and reran the model. The MSE of the random forest model has stabilized by 500 bootstrapped trees, and the mtry = 2 default number of subsetted predictors was deemed to be the ideal parameter value. Further removing less influential predictors beyond `Week_Number` decreased OOB performance.
+
+```{r echo=FALSE, message=FALSE, warning=FALSE, fig.cap='Final RF Model'}
+set.seed(222)
+
+rf2 <- randomForest(Weekly_Sales ~ . - Date - Week_Number, ntree = 500, 
+                    mtry = 2, data = dataset_train, importance = TRUE)
+rf2
+```
+
+```{r echo=FALSE, fig.cap='Variable Importance Plot', fig.height=4, message=FALSE, warning=FALSE}
+vip(rf2)
+```
+
+From the VIP plot of the predictors we can see that Store is by far the most important predictor. Unlike the linear regression model, the random forest model retained numerical predictors such as CPI and Unemployment. However, the relatively poor built in crossvalidation on the out of bag data can be explained by the process the random forest takes while creating the bootstrapped decision trees. While the data is clearly seasonal, the process of randomly sampling observations in the random forest process does not preserve the elements of autocorrelation nor does it keep the seasonal effects of the sharp increases in weekly sales towards the end of the year.
+
+## Final Prediction and Model Analysis
+
+Here we lay out the results of the cross-validation on the withheld 2012 sales data. The removal of the highly correlated predictors within the model makes very minor increases in the cross validation RMSE results while the log transformation actually decreases our RMSE value. The high RMSE of the Random Forest model shows its inadequacy in dealing with time series data without further changes in either how the model incorporates its predictors or samples observations. In real world terms, if we make a prediction using the best model, the transformed and reduced linear regression (final) model, we would be off on average by \$97,726.79 from the actual value. Considering that the average weekly sales for the data was found to be \$1,046,965, this model's predictions are not too far off from the actual values.
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+library(knitr)
+
+RMSE <- function(y, y_hat) {
+  sqrt(mean((y - y_hat)^2))
+}
+
+pred_lm3 <- predict(lm3, newdata = dataset_test)
+pred_lm3_reduced <- predict(lm3_reduced, newdata = dataset_test)
+pred_lm3_trans <- predict(lm3_trans, newdata = dataset_test)
+pred_rf2 <- predict(rf2, newdata = dataset_test)
+
+RMSE_res <- matrix(c(104821.67, 104980.35, 97726.79, 433795.92),
+              ncol = 4, byrow= TRUE)
+colnames(RMSE_res) <- c('Full Model', 'Reduced Model', 'Full Reduced and Transformed Model', 'Random Forest Model')
+rownames(RMSE_res) <- "RMSE Values"
+
+kable(RMSE_res)
+
+# RMSE(dataset_test$Weekly_Sales, pred_lm3)
+# RMSE(dataset_test$Weekly_Sales, pred_lm3_reduced)
+# RMSE(dataset_test$Weekly_Sales, exp(pred_lm3_trans))
+# RMSE(dataset_test$Weekly_Sales, pred_rf2)
+```
+
+# Conclusion
+
+We have determined that a linear regression model with Weekly Sales as the response and Holiday Flag, Month, Week,(all seasonal dummy variables) and Store as predictors explain a high percentage of the variance in the response. Unfortunately the traditional assumptions of linear regression do not hold up well in regards to non-stationary time series data, thus while we can make interpretations with the coefficients and sign values, it is difficult to determine relationships between each predictor and the response in confidence. However, with good predictive performance with cross-validation and a high $R^2$ value, the model has proven itself as an effective model for the purposes of prediction and outperformed the Random Forest model.
+
+\newpage
+
+# Addendum: ARIMA Model Implementation
+
+An ARIMA model is one useful option for uni-variate prediction of a response variable. This model uses a linear combination of past(lagged) variable values as well as a component with the weighted moving average of the past forecast errors. The seasonal ARIMA model I will use here also includes non-seasonal and seasonal terms. Our objective in this section is to predict the sum of all total weekly sales of all 45 Walmart stores over time.
+
+I conducted a unit root test to determine both if the data set can be considered stationary as well to determine whether a first difference may be necessary. In a Kwiatkowski-Phillips-Schmidt-Shin (KPSS) test, the null hypothesis is that the data is stationary and the alternative hypothesis says that the data is not stationary. Furthermore, the obvious seasonal effect of sharp sales increases towards the end of year very likely necessitates the use of one seasonal difference, which we will apply as gap of one year.
+
+The variance of the time series data does not seem to be drastically increasing or decreasing over time so a transformation may not be necessary here.
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+library(fpp3)
+library(fable)
+
+dataset2 <- read_csv("Walmart.csv")
+# dataset2$Date <- dmy(dataset2$Date)
+
+
+ts <- dataset2 %>% 
+  group_by(Date)  %>%  
+  summarize("Total_Sales_Per_Week" = sum(Weekly_Sales))
+
+#ts_sales <- ts %>% tsibble(index = Date)
+
+ts_sales <- ts %>%  
+  mutate(Date = yearweek(dmy(Date))) %>% 
+  as_tsibble(index = "Date")
+
+```
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+ts_sales %>%
+  features(Total_Sales_Per_Week, unitroot_kpss)
+```
+
+With a p-value above the chosen alpha of 0.05, we fail to reject the null hypothesis that the data is stationary and no first order difference is necessary. I now apply the `ARIMA()` function, which will automatically produce the coefficients of an ARIMA(p,d,q)(P,D,Q) model.
+
+```{r echo=FALSE, fig.cap='ACF Plot of the Time Series Data', fig.height=3, message=FALSE, warning=FALSE}
+ts_sales %>% 
+  ACF(Total_Sales_Per_Week) %>% 
+  autoplot()
+
+```
+
+```{r echo=FALSE, fig.cap='PACF Plot of the Time Series Data', fig.height=3, message=FALSE, warning=FALSE}
+ts_sales %>% 
+  PACF(Total_Sales_Per_Week) %>% 
+  autoplot()
+  
+```
+
+\newpage
+
+```{r echo=FALSE, fig.cap='ARIMA Model Diagnostics', fig.height=3, message=FALSE, warning=FALSE}
+fit <- ts_sales %>% 
+  model(autoarima = ARIMA(Total_Sales_Per_Week, stepwise=FALSE, approximation=FALSE))
+report(fit)
+
+fit %>% gg_tsresiduals()
+```
+
+A check of the residuals inside the ARIMA(0,1,1)(0,1,0)\_(52) model show that almost all acf values of the residuals are within the threshold of the ACF plot and the residuals follow an approximately normal distribution. This model uses one seasonal difference, one first difference, and one moving average term. While the KPSS test concluded that the data was stationary, the model selection procedure in the `ARIMA()` function still found that an ARIMA model with a first order difference was the best model.
+
+```{r echo=FALSE, fig.cap='Forecasted Weekly Sales Values', fig.height=3, message=FALSE, warning=FALSE}
+
+fc <- fit %>%
+  forecast(h=25) %>% 
+  autoplot(ts_sales)
+fc
+
+```
+
+```{r echo=FALSE}
+summary(ts$Total_Sales_Per_Week)
+```
+
+```{r echo=FALSE}
+# fc2 <- fit %>%
+#   forecast() 
+# fc2
+# 
+# accuracy(data = fc2)
+
+fit %>% accuracy()
+```
+
+It is clear from the RMSE metrics and plot of estimated future values that the ARIMA model serves as a good predictor of future total weekly sales across all Walmart stores. A good way to further investigate the efficacy of this model would be to split the data into training and test sets, applying the earlier cross-validation procedures used for the first two models to verify predictive efficacy and analyze whether the RMSE values significantly decrease.

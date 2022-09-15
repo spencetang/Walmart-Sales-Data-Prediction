@@ -1,0 +1,397 @@
+---
+title: "Presentation Ready Data"
+author: "Spencer Tang, Online/Virtual Section"
+date: "5/3/2022"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(ggplot2)
+library(dplyr)
+library(readr)
+library(lubridate)
+library(forecast)
+library(tidyverse)
+dataset <- read_csv("Walmart.csv")
+library(car)
+library(performance)
+library(randomForest)
+library(vip)
+```
+
+```{r}
+dataset$Date <- dmy(dataset$Date)
+
+dataset$Store <- as.factor(dataset$Store)
+dataset$Holiday_Flag <- as.factor(dataset$Holiday_Flag)
+```
+
+```{r}
+dataset <- dataset %>% 
+  mutate(Week_Number = week(Date))
+
+dataset <- dataset %>% 
+  mutate(Year = year(Date))
+
+dataset <- dataset %>% 
+  mutate(Month = month(Date))
+
+dataset$Month <- as.factor(dataset$Month)
+dataset$Week_Number <- as.factor(dataset$Week_Number)
+
+str(dataset$Week_Number)
+```
+
+```{r}
+set.seed(222)
+
+training_id <- which(dataset$Year <= 2011)
+
+dataset_train <- dataset[training_id, ]
+dataset_test <- dataset[-training_id, ]
+
+dim(dataset_train)
+dim(dataset_test)
+dim(dataset)
+
+dataset$Year <- as.factor(dataset$Year)
+```
+
+# Data Investigation
+
+```{r}
+summary(dataset$Weekly_Sales)
+```
+
+
+```{r}
+ggplot(dataset, aes(x = reorder(as.factor(Store), 
+                                Weekly_Sales/ 1000), Weekly_Sales / 1000)) +
+       geom_boxplot() + 
+  coord_flip() +
+  xlab("Store") +
+  ylab("Weekly Sales in Thousands")
+```
+```{r}
+ggplot(aes(Unemployment, Weekly_Sales/ 1000), data = dataset) +
+  geom_point() +
+  geom_smooth(method="loess") + 
+  ylab("Weekly Sales in Thousands")
+```
+```{r}
+ggplot(aes(CPI, Weekly_Sales / 1000), data = dataset) +
+  geom_point() +
+  geom_smooth(method="loess") +
+  ylab("Weekly Sales in Thousands")
+```
+
+
+# Full Model
+
+```{r}
+lm3 <- lm(Weekly_Sales ~ Holiday_Flag + Temperature + Fuel_Price + CPI + 
+            Unemployment + Store + Week_Number + Month, data = dataset_train)
+summary(lm3)
+
+#lm3_reduced <- step(lm3)
+```
+
+```{r}
+check_model(lm3)
+```
+
+```{r}
+df <- as.data.frame(dataset)
+
+cor_matrix <- dataset[, c(3, 5, 6, 7, 8)]
+head(cor_matrix)
+
+cor(cor_matrix)
+```
+
+
+```{r}
+library(GGally)
+
+ggcorr(dataset)
+```
+
+```{r}
+check_collinearity(lm3)
+```
+
+```{r}
+lm3_reduced <- lm(Weekly_Sales ~ Holiday_Flag + 
+     Store + Week_Number + Month, data = dataset_train)
+summary(lm3_reduced)
+```
+
+```{r}
+RMSE <- function(y, y_hat) {
+  sqrt(mean((y - y_hat)^2))
+}
+
+pred_lm3 <- predict(lm3, newdata = dataset_test)
+pred_lm3_reduced <- predict(lm3_reduced, newdata = dataset_test)
+
+RMSE(dataset_test$Weekly_Sales, pred_lm3)
+RMSE(dataset_test$Weekly_Sales, pred_lm3_reduced)
+```
+
+```{r}
+library(MASS)
+library(car)
+boxcox(lm3_reduced)
+summary(powerTransform(lm3_reduced))
+
+```
+
+# Outlier Check
+
+```{r}
+plot(dataset_train$Weekly_Sales, rstandard(lm3_reduced),
+xlab = "Weekly Sales", ylab = "Standardized Residuals")
+abline(h=c(-4,4), lty=2)
+
+
+ind <- which(abs(rstandard(lm3_reduced)) > 4)
+dataset_train[ind, ]
+
+```
+
+```{r}
+lm3_trans <- lm(log(Weekly_Sales) ~ Holiday_Flag + 
+     Store + Week_Number + Month, data = dataset_train)
+summary(lm3_trans)
+```
+# Final model Diagnostics
+
+```{r}
+plot(lm3_trans, 1:2)
+```
+## acf plot
+
+```{r}
+acf(resid(lm3_trans), main="acf(resid(lm3))")
+pacf(resid(lm3_trans), main="pacf(resid(lm3))")
+```
+
+
+
+# Final Prediction 
+
+```{r}
+pred_lm3_trans <- predict(lm3_trans, newdata = dataset_test)
+
+RMSE(dataset_test$Weekly_Sales, pred_lm3)
+RMSE(dataset_test$Weekly_Sales, pred_lm3_reduced)
+RMSE(dataset_test$Weekly_Sales, exp(pred_lm3_trans))
+```
+
+# Random Forest
+
+```{r}
+library(randomForest)
+library(vip)
+```
+
+```{r}
+set.seed(222)
+
+rf1 <- randomForest(Weekly_Sales ~ Holiday_Flag + Temperature + Fuel_Price + 
+    CPI + Unemployment + Store + Week_Number + Month + Year, 
+    data = dataset_train, importance = TRUE)
+rf1
+```
+
+```{r}
+vip(rf1)
+```
+
+```{r}
+set.seed(222)
+
+rf2 <- randomForest(Weekly_Sales ~ . - Date - Week_Number, ntree = 500, 
+                    mtry = 2, data = dataset_train, importance = TRUE)
+rf2
+```
+
+### RMSE Check
+```{r}
+pred_rf2 <- predict(rf2, newdata = dataset_test)
+
+RMSE(dataset_test$Weekly_Sales, pred_rf2)
+```
+
+
+## Fitted vs Actual Values
+
+```{r}
+pred_df <- data.frame(
+  Actual = dataset_test$Weekly_Sales, 
+  Pred_RF = pred_rf2,
+  Pred_LM = pred_lm3_trans
+) 
+
+ggplot(pred_df, aes(x = Actual, y = Pred_RF)) +
+  geom_point() +
+  geom_abline(intercept = 0, slope = 1) +
+  xlab("Actual Weekly Sales") + ylab("Predicted Sales") +
+  ggtitle("Random Forests") 
+  #xlim(0,2000) + ylim(0,2000)
+
+
+
+```
+
+# ARIMA Model
+
+```{r}
+library(fpp3)
+
+# dataset %>% ACF(Weekly_Sales) %>% 
+#   autoplot() + labs(subtitle = "Google closing stock price")
+
+dataset2 <- read_csv("Walmart.csv")
+dataset2$Date <- dmy(dataset2$Date)
+
+ts <- dataset_train %>% 
+  group_by(Date)  %>%  
+  summarize("Total_Sales_Per_Week" = sum(Weekly_Sales))
+ts
+
+# reduced_dataset <- ts %>% 
+#   select(Total_Sales_Per_Week, Date) %>% 
+#   arrange(Date)
+# reduced_dataset
+
+ts_sales <- ts %>% tsibble(index = Date)
+```
+
+## Diagnostics
+
+```{r}
+ts_sales %>% ACF() %>% 
+  autoplot() + labs(subtitle = "Weekly Sales")
+
+ts_sales %>% ACF(difference(Total_Sales_Per_Week)) %>% 
+  autoplot() + labs(subtitle = "Changes in Total Weekly Sales")
+
+ts_sales %>% ACF(difference(Total_Sales_Per_Week)) %>% 
+  autoplot() + labs(subtitle = "Changes in Log Total Weekly Sales")
+
+ggplot(aes(x = Date, y = Total_Sales_Per_Week / 1000), data = ts_sales) +
+  geom_line()
+
+```
+
+```{r}
+# seasonal difference of 52 weeks
+
+ts_sales %>%
+  gg_tsdisplay(difference(Total_Sales_Per_Week, 52),
+               plot_type='partial', lag=20) +
+  labs(title="Seasonally differenced", y="")
+
+
+ts_sales %>%
+  features(Total_Sales_Per_Week, unitroot_ndiffs)
+
+ts_sales %>% 
+  features(Total_Sales_Per_Week, unitroot_nsdiffs)
+```
+
+
+## Test for Stationary Data
+
+```{r}
+ts_sales %>%
+  features(Total_Sales_Per_Week, unitroot_kpss)
+
+ts_sales %>%
+  mutate(diff_close = difference(Total_Sales_Per_Week)) %>%
+  features(diff_close, unitroot_kpss)
+
+ts_sales %>% 
+  features(Total_Sales_Per_Week, ljung_box, lag = 10)
+
+# ts_sales %>%
+#   mutate(diff_sales = log(difference(Total_Sales_Per_Week))) %>% 
+#   features(diff_sales, ljung_box, lag = 10)
+```
+
+## ARIMA Model Code
+
+```{r}
+ts_sales %>%  model(ARIMA(Total_Sales_Per_Week)) %>% report()
+
+ar <- ts_sales %>%  model(
+  arima201 = ARIMA(Total_Sales_Per_Week ~ pdq(2,0,1))
+)
+ar
+
+```
+
+```{r}
+ar %>% dplyr::select(arima201) %>%  gg_tsresiduals()
+```
+
+### Auto ARIMA
+
+```{r}
+library(fable)
+
+fit <- ts_sales %>% model(auto = ARIMA(Total_Sales_Per_Week, stepwise = FALSE, approx = FALSE))
+
+fit %>% pivot_longer(everything(), names_to = "Model name",
+                     values_to = "Orders")
+
+# fit2 <- ts_sales %>% ARIMA(Total_Sales_Per_Week, stepwise = FALSE, approx = FALSE)
+
+
+fit %>% dplyr::select(auto) %>% gg_tsresiduals()
+
+auto.arima(ts_sales, trace=TRUE)
+
+glance(fit) %>% arrange(AICc) %>% select(.model:BIC)
+
+predict(fit,n.ahead = 5)
+
+
+```
+### Forecast
+
+```{r}
+fit %>%
+  forecast(h = 7) %>%
+  filter(.model=='auto') %>% 
+  autoplot(ts_sales)
+
+
+```
+
+
+```{r}
+# use accuracy function to get RMSE
+
+fit %>% accuracy()
+
+```
+
+### Seasonal ARIMA
+
+```{r}
+ts_sales %>%
+  gg_tsdisplay(difference(Total_Sales_Per_Week, 52) %>% difference(),
+               plot_type='partial', lag=52) +
+  labs(title="Seasonally differenced", y="")
+
+fit3 <- ts_sales %>% 
+  model(autoarima = ARIMA(Total_Sales_Per_Week ~ pdq(2,0,2) + PDQ(0,1,0)))
+report(fit3)
+```
+
